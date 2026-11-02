@@ -92,8 +92,9 @@ def main():
     rc, toasts, log = run(exe, tmp, con)
     check("exit 0", rc == 0, rc)
     conf = open(os.path.join(tmp, "out", "scale.txt")).read()
-    check("scale.txt has fake4k=1 and 2160p=0",
-          "\nfake4k=1\n2160p=0\n" in conf, conf)
+    check("scale.txt has upstream defaults and native4k=0",
+          all(f"\n{k}={v}\n" in conf for k, v in
+              (("fake4k", 1), ("native4k", 0), ("2160p", 0))), conf)
     check("fake game ran clean", not con.errors, con.errors)
     check("writes: fake cave, snap, fake jump, then 60fps",
           addrs(con) == [hex(rs.FAKE_CAVE), hex(rs.SNAP), hex(rs.FAKE), hex(FPS)],
@@ -104,12 +105,32 @@ def main():
     check("final toast: 60fps + resolution",
           has(toasts, "60FPS IS ON, Enjoy.\n"
                       "Resolution: 1920x2160 checkerboard, 3840x2160 frame\n"), toasts)
-    check("settings logged", "fake 4K on, 4K scale stock (0)" in log, log)
+    check("settings logged", "fake 4K on, native 4K off, 4K scale stock (0)" in log, log)
     print("  toasts:", *toasts, sep="\n    ")
+
+    for mode in ((3840, 2160), (1920, 1080)):
+        for fake4k in (1, 0):
+            scenario(f"native4k=1, fake4k={fake4k}, TV {mode}")
+            con = Console(tmp, [NO_GAME, RDR2], mode=mode)
+            rc, toasts, log = run(exe, tmp, con,
+                                  settings=f"fake4k={fake4k}\nnative4k=1\n2160p=0\n")
+            check("exit 0", rc == 0, rc)
+            check("fake game ran clean", not con.errors, con.errors)
+            check("native sizes including final mode (no snap reversal)",
+                  con.sizes() == (3840, 2160, 3840, 2160, 3840, 2160), con.sizes())
+            check("cave fits reserved room",
+                  [len(data) for addr, data in con.writes if addr == rs.FAKE_CAVE] == [67] and
+                  con.get(rs.FAKE_CAVE + 67, 128 - 67) == bytes(128 - 67))
+            check("checkerboard disabled", con.get(rs.NODE + 0xe9, 1) == b"\x00")
+            check("snap bypass", con.get(rs.SNAP, 2) == b"\xeb\x19")
+            check("60fps unchanged", con.get(FPS, 3) == FPS_NEW)
+            check("native toast", has(toasts, "Resolution: 3840x2160 native, 3840x2160 frame"), toasts)
+            check("sizes logged", "base 3840x2160, scaled 3840x2160, final 3840x2160" in log, log)
+            check("native setting logged", "native 4K on, 4K scale stock (0)" in log, log)
 
     scenario("2160p=2: 1440p checkerboard")
     con = Console(tmp, [NO_GAME, RDR2])
-    rc, toasts, _ = run(exe, tmp, con, settings="fake4k=1\n2160p=2\n")
+    rc, toasts, _ = run(exe, tmp, con, settings="fake4k=1\nnative4k=0\n2160p=2\n")
     check("exit 0", rc == 0, rc)
     check("fake game ran clean", not con.errors, con.errors)
     check("writes: caves, snap, jumps, 60fps",

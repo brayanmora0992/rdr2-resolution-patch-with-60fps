@@ -56,7 +56,7 @@
 #include <ps5/klog.h>
 #include <ps5/mdbg.h>
 
-#define TOOL_VERSION "2.0"
+#define TOOL_VERSION "2.1-exp-native4k"
 
 /* process name shown by payload managers (PLDMGR lists processes whose name
  * ends in .elf; the kernel keeps at most 19 characters) */
@@ -562,10 +562,11 @@ static int wait_for_game(struct fg_info *fg, int *already_open) {
 
 /* ------------------------------------------------------------ resolution */
 
+static int g_native4k = 0;   /* experimental: disable checkerboard */
 static int g_fake4k = 1;     /* game believes the TV is 4K (1080p TVs) */
 static int g_scale_2160 = 0; /* PC Resolution Scale index for 4K */
 
-/* Reads "fake4k=" and "2160p=" lines; writes the defaults if the file
+/* Reads "fake4k=", "native4k=" and "2160p=" lines; writes the defaults if the file
  * doesn't exist yet, so there's something to edit over FTP. */
 static void load_settings(void) {
     char line[128];
@@ -573,11 +574,14 @@ static void load_settings(void) {
     if (!f) {
         f = fopen(CONF_PATH, "w");
         if (f) {
-            fprintf(f, "# RDR2 resolution. fake4k=1: on a 1080p TV, use the game's own\n"
-                       "# 4K checkerboard (1920x2160 -> 3840x2160, shown at 1080p).\n"
-                       "# 2160p: 0 = stock, or a lighter render for more fps headroom:\n"
-                       "#  3 = 3/4 (2880x1620), 2 = 2/3 (2560x1440), 1 = 1/2 (1920x1080)\n"
-                       "fake4k=1\n2160p=0\n");
+            fprintf(f, "# RDR2 resolution settings\n\n"
+                       "fake4k=1\n\n"
+                       "# Experimental native 3840x2160 rendering.\n"
+                       "# 0 = original PS4 Pro checkerboard\n"
+                       "# 1 = experimental 3840x2160 with checkerboard disabled\n"
+                       "native4k=0\n\n"
+                       "# 2160p: 0 = stock; keep 0 for native4k hardware tests.\n"
+                       "2160p=0\n");
             fclose(f);
             logmsg("INFO", "wrote default settings to %s", CONF_PATH);
         }
@@ -591,6 +595,8 @@ static void load_settings(void) {
         v = atoi(eq + 1);
         if (!strncmp(line, "fake4k", 6)) {
             g_fake4k = v != 0;
+        } else if (!strncmp(line, "native4k=", 9)) {
+            g_native4k = v != 0;
         } else if (!strncmp(line, "2160p", 5)) {
             if (v < 0 || v > RES_MAX_INDEX)
                 logmsg("WARN", "ignoring 2160p=%d (must be 0..%d: ratios above 1 "
@@ -637,9 +643,10 @@ static uint32_t emit_r12_set(uint8_t *out, uint32_t n, uint32_t disp, uint32_t v
 
 /* The fake-4K cave, from the apply step's copy of the node's screen size
  * (r12 = the live settings node):
- *   cmp dword [r12+0x1c0], 1080; jne copy
+ *   cmp dword [r12+0x1c0], 1080; jne checkerboard (native) or copy (stock)
  *   mov dword [r12+0x1bc], 3840; mov dword [r12+0x1c0], 2160
- *   mov byte [r12+0xe9], 1                         ; checkerboard on
+ *   checkerboard: mov byte [r12+0xe9], native ? 0 : 1
+ * Native clears the flag even on an already-4K TV, before sizing.
  *   copy: mov rax, [r12+0x1bc]; mov [rip -> video mode], rax   ; the original
  *   jmp resume
  * Returns its length (67). */
@@ -656,9 +663,13 @@ static uint32_t build_fake_cave(uint64_t base, uint8_t out[RES_CAVE_ROOM]) {
     jne_at = n++;
     n = emit_r12_set(out, n, 0x1bc, 3840);
     n = emit_r12_set(out, n, 0x1c0, 2160);
+    if (g_native4k)
+        out[jne_at] = (uint8_t)(n - (jne_at + 1));
     memcpy(out + n, cb, sizeof(cb));
+    out[n + sizeof(cb) - 1] = g_native4k ? 0 : 1;
     n += sizeof(cb);
-    out[jne_at] = (uint8_t)(n - (jne_at + 1));
+    if (!g_native4k)
+        out[jne_at] = (uint8_t)(n - (jne_at + 1));
     memcpy(out + n, ld, sizeof(ld)); /* mov rax, [r12 + 0x1bc] */
     n += 8;
     out[n++] = 0x48; /* mov [rip + d], rax */
@@ -726,10 +737,10 @@ enum { RS_SNAP, RS_FAKE, RS_SCALE, RS_COUNT }; /* also the write order */
 static void res_sites(struct res_site s[RS_COUNT], uint64_t base) {
     memset(s, 0, sizeof(struct res_site) * RS_COUNT);
     s[RS_SNAP] = (struct res_site){"mode snap", RES_SNAP_RVA, RES_SNAP_LEN,
-                                   RES_SNAP_CTX, g_fake4k, {0}, {0}};
+                                   RES_SNAP_CTX, (g_fake4k || g_native4k), {0}, {0}};
     memcpy(s[RS_SNAP].want, RES_SNAP_NEW, RES_SNAP_LEN);
     s[RS_FAKE] = (struct res_site){"fake 4K", RES_FAKE_RVA, RES_FAKE_LEN,
-                                   RES_FAKE_CTX, g_fake4k, {0}, {0}};
+                                   RES_FAKE_CTX, (g_fake4k || g_native4k), {0}, {0}};
     build_jmp(base + RES_FAKE_RVA, base + RES_FAKE_CAVE, s[RS_FAKE].want,
               RES_FAKE_LEN);
     s[RS_SCALE] = (struct res_site){"scale", RES_SCALE_RVA, RES_SCALE_LEN,
@@ -930,13 +941,15 @@ static void res_report(uint32_t pid, uint64_t base, char *line, size_t len) {
     idx = sz[1] > 2159 ? (uint32_t)g_scale_2160 : 0;
     ew = idx ? sz[0] * RATIO_NUM[idx - 1] / RATIO_DEN[idx - 1] : sz[0];
     eh = idx ? sz[1] * RATIO_NUM[idx - 1] / RATIO_DEN[idx - 1] : sz[1];
-    if (sz[2] != ew || sz[3] != eh || (g_fake4k && sz[1] == 1080)) {
+    if (sz[2] != ew || sz[3] != eh || ((g_fake4k || g_native4k) && sz[1] == 1080)) {
         logmsg("WARN", "expected %s on a 4K or faked-4K TV", RATIO_NAME[idx]);
         notify("resolution didn't take effect (rendering %ux%u).", sz[2], sz[3]);
         return;
     }
     snprintf(line, len, "Resolution: %ux%u%s, %ux%u frame", sz[2], sz[3],
-             sz[4] != sz[0] ? " checkerboard" : "", sz[4], sz[5]);
+             sz[0] == 3840 && sz[1] == 2160 && sz[2] == 3840 &&
+             sz[3] == 2160 && sz[4] == 3840 && sz[5] == 2160 ? " native" :
+             (sz[4] != sz[0] ? " checkerboard" : ""), sz[4], sz[5]);
 }
 
 static int finish(int code) {
@@ -982,8 +995,8 @@ int main(void) {
     logmsg("INFO", "console firmware %x.%02x", kernel_get_fw_version() >> 24,
            (kernel_get_fw_version() >> 16) & 0xff);
     load_settings();
-    logmsg("INFO", "resolution settings: fake 4K %s, 4K scale %s (%d)",
-           g_fake4k ? "on" : "off", RATIO_NAME[g_scale_2160], g_scale_2160);
+    logmsg("INFO", "resolution settings: fake 4K %s, native 4K %s, 4K scale %s (%d)",
+           g_fake4k ? "on" : "off", g_native4k ? "on" : "off", RATIO_NAME[g_scale_2160], g_scale_2160);
 
     /* 1) wait for the game */
     notify("ready. Start Red Dead Redemption 2 (waiting up to 10 min)");
@@ -1012,7 +1025,7 @@ int main(void) {
 
     /* 3) resolution first: it has to land before the game applies its
      * settings; whatever happens here, the 60fps patch still follows */
-    if (g_fake4k || g_scale_2160) {
+    if (g_fake4k || g_native4k || g_scale_2160) {
         if (already_open)
             notify("resolution: RDR2 was already open, it's set at startup. "
                    "Load this before starting RDR2 for 4K; 60fps only.");

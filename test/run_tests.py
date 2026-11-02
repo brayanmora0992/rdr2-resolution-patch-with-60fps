@@ -95,6 +95,8 @@ class FakeConsole:
 
     def close(self):
         self.alive = False
+        # Wake a blocking accept() before close so Linux releases the port.
+        self.srv.shutdown(socket.SHUT_RDWR)
         self.srv.close()
 
     def _accept(self):

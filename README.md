@@ -128,3 +128,39 @@ curl -L https://www.gnu.org/licenses/gpl-3.0.txt >> LICENSE
 
 Experimental software, use it at your own risk. Not affiliated with Rockstar
 Games or Sony.
+
+## Experimental Native 4K
+
+This experimental variant imports [armanate/rdr2-60fps-runtime-patcher](https://github.com/armanate/rdr2-60fps-runtime-patcher)
+commit `8ed0d887e9767ab0e6b7884987077aba535f08d4` (v2.0).
+Original licensing and attributions remain in place. The experimental payload
+identifies itself as `2.1-exp-native4k`; it is not a stable release.
+
+For the first PS5 hardware test, use only these settings in
+`/data/rdr2-60fps/scale.txt`, and start the payload before launching RDR2:
+
+```ini
+fake4k=1
+native4k=1
+2160p=0
+```
+
+`native4k` defaults to `0`, preserving upstream checkerboard behavior.
+When enabled, the existing resolution hook promotes a 1080p settings node to
+3840x2160, bypasses mode snap, and clears the checkerboard flag before sizing.
+It also clears the flag when the TV already reports 3840x2160. Native mode
+activates these hooks even with `fake4k=0`. No new offsets or hooks are used;
+the 60 FPS patch is unchanged, and the patch remains runtime only.
+
+**Not yet verified on PS5 hardware.** The hypothesis is that PS4 RDR2 v1.32
+will size base, scaled, and final buffers to 3840x2160 with checkerboard off.
+Host simulation does not prove that the real renderer can use those sizes.
+Possible outcomes include correct operation, graphical corruption, a crash,
+memory/render-target problems, or insufficient performance. This experiment
+does not adjust allocators, auxiliary render targets, G-buffer, TAA, shaders,
+LOD, textures, effects, or GPU memory management. Do not combine the first
+hardware test with resolution scaling or other experimental changes.
+
+Check the log for `base 3840x2160, scaled 3840x2160, final 3840x2160`.
+The notification labels this full-size result `native`; smaller scaled renders
+are not labeled native. Restart the game to undo runtime changes.
